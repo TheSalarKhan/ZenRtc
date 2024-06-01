@@ -34,9 +34,13 @@ const standardConfig = {
 
 const minifiedConfig = {
   ...baseConfig,
+  experiments: {
+    outputModule: true
+  },
   output: {
-    ...baseConfig.output,
+    libraryTarget: 'module',
     filename: 'zen-rtc.min.js',
+    path: baseConfig.output.path
   },
   optimization: {
     minimize: true,
