@@ -46,7 +46,7 @@ export interface PeerOptions {
   iceCompleteTimeout?: number;
 }
 
-export class Peer {
+export class SimplePeer {
   private eventEmitter: EventEmitter;
   private pc: RTCPeerConnection | null;
   private id: string;
