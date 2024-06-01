@@ -1,0 +1,25 @@
+{
+  "name": "zen-rtc-html-app",
+  "version": "1.0.0",
+  "description": "A vanilla JS example app using typescript, zenrtc, and webpack",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "webpack --mode production",
+    "start": "webpack serve --mode development",
+    "lint": "eslint . --ext .ts"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^4.0.0",
+    "webpack": "^5.0.0",
+    "webpack-cli": "^4.0.0",
+    "webpack-dev-server": "^4.0.0",
+    "ts-loader": "^9.0.0",
+    "html-webpack-plugin": "^5.0.0",
+    "clean-webpack-plugin": "^4.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.11.0",
+    "@typescript-eslint/parser": "^7.11.0",
+    "eslint": "^8.57.0"
+  }
+}

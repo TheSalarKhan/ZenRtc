@@ -1,6 +1,7 @@
 {
   "eslint.workingDirectories": [
     "./zen-rtc",
+    "./examples/zen-rtc-html-app"
   ],
   "editor.codeActionsOnSave": {
     "source.fixAll.eslint": true
