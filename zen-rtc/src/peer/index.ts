@@ -5,8 +5,6 @@ import debuglib from 'debug';
 import { filterTrickle } from './filter-trickle';
 
 
-const debugLogger = debuglib('peer');
-
 const CHANNEL_CLOSING_TIMEOUT = 5 * 1000;
 const ICECOMPLETE_TIMEOUT = 5 * 1000;
 
@@ -36,6 +34,7 @@ export interface PeerOptions {
     RTCSessionDescription: typeof RTCSessionDescription;
     RTCIceCandidate: typeof RTCIceCandidate;
   };
+  enableLogging?: boolean;
   trickle?: boolean;
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
@@ -50,6 +49,7 @@ export class SimplePeer {
   private eventEmitter: EventEmitter;
   private pc: RTCPeerConnection | null;
   private id: string;
+  private debugLogger: debuglib.Debugger;
   // state keeping variables
   private destroyed = false;
   private destroying = false;
@@ -81,6 +81,10 @@ export class SimplePeer {
   constructor(private readonly options: PeerOptions) {
     this.eventEmitter = new EventEmitter();
     this.id = v4();
+    this.debugLogger = debuglib(`peer_${this.id}`);
+    if(options.enableLogging) {
+      this.debugLogger.enabled = true;
+    }
 
     const { RTCPeerConnection } = this.options.wrtc;
     // create the peer connection
@@ -528,8 +532,7 @@ export class SimplePeer {
     // eslint-disable-next-line prefer-rest-params
     // const args: unknown[] = [].slice.call(arguments);
     // eslint-disable-next-line @typescript-eslint/restrict-plus-operands
-    args[0] = '[' + this.id + '] ' + args[0];
-    debugLogger(null, ...args);
+    this.debugLogger(args[0], ...args.slice(1));
   }
 
   // #region IceStateChange

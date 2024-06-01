@@ -9,7 +9,12 @@
     "allowJs": true,
     "moduleResolution": "node",
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "*": ["src/*"], // local src
+      "@zen-rtc/*": ["../../zen-rtc/src/*"] // zen-rtc src
+    }
   },
   "include": ["./src/**/*"]
 }
