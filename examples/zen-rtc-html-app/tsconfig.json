@@ -16,5 +16,8 @@
       "@zen-rtc/*": ["../../zen-rtc/src/*"] // zen-rtc src
     }
   },
-  "include": ["./src/**/*"]
+  "include": [
+    "./src/**/*",
+    "../../zen-rtc/src/**/*"
+  ]
 }
