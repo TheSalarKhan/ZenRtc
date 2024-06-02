@@ -2,7 +2,7 @@ import { EventEmitter } from 'eventemitter3';
 import { PeerEvents, SignalEventPayloadType } from './peer-events';
 import { v4 } from 'uuid';
 import debuglib from 'debug';
-import { filterTrickle } from './filter-trickle';
+import { removeTrickle } from './remove-trickle';
 
 
 const CHANNEL_CLOSING_TIMEOUT = 5 * 1000;
@@ -35,7 +35,7 @@ export interface PeerOptions {
     RTCIceCandidate: typeof RTCIceCandidate;
   };
   enableLogging?: boolean;
-  trickle?: boolean;
+  disableTrickle?: boolean;
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
   config?: RTCConfiguration;
@@ -174,7 +174,7 @@ export class SimplePeer {
     this.pc!.createOffer(this.options.offerOptions)
       .then(offer => {
         if (this.destroyed || !offer.sdp) return;
-        if (!this.options.trickle) offer.sdp = filterTrickle(offer.sdp);
+        if (this.options.disableTrickle === true) offer.sdp = removeTrickle(offer.sdp);
         offer.sdp = this.options.sdpTransform ? this.options.sdpTransform(offer.sdp) : offer.sdp;
 
         const sendOffer = () => {
@@ -190,7 +190,7 @@ export class SimplePeer {
         const onSuccess = () => {
           this.debug('createOffer success');
           if (this.destroyed) return;
-          if (this.options.trickle || this.iceComplete) sendOffer();
+          if (!this.options.disableTrickle || this.iceComplete) sendOffer();
           else this.eventEmitter.once('_iceComplete', sendOffer); // wait for candidates
         };
 
@@ -270,7 +270,7 @@ export class SimplePeer {
     this.pc!.createAnswer(this.options.answerOptions)
       .then(answer => {
         if (this.destroyed || !answer.sdp) return;
-        if (!this.options.trickle) answer.sdp = filterTrickle(answer.sdp);
+        if (this.options.disableTrickle === true) answer.sdp = removeTrickle(answer.sdp);
         answer.sdp = this.options.sdpTransform ? this.options.sdpTransform(answer.sdp) : answer.sdp;
 
         const sendAnswer = () => {
@@ -286,7 +286,7 @@ export class SimplePeer {
 
         const onSuccess = () => {
           if (this.destroyed) return;
-          if (this.options.trickle || this.iceComplete) sendAnswer();
+          if (!this.options.disableTrickle || this.iceComplete) sendAnswer();
           else this.eventEmitter.once('_iceComplete', sendAnswer);
         };
 
@@ -849,7 +849,7 @@ export class SimplePeer {
 
   private onIceCandidate(event: RTCPeerConnectionIceEvent) {
     if (this.destroyed) return;
-    if (event.candidate && this.options.trickle) {
+    if (event.candidate && !this.options.disableTrickle) {
       this.emit('signal', {
         type: 'candidate',
         candidate: {
