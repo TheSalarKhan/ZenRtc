@@ -27,7 +27,7 @@ interface GetStatsItem {
   googRemoteAddress?: string;
 }
 
-export interface PeerOptions {
+export interface SimplePeerInitOptions {
   initiator: boolean;
   wrtc: {
     RTCPeerConnection: typeof RTCPeerConnection;
@@ -35,6 +35,7 @@ export interface PeerOptions {
     RTCIceCandidate: typeof RTCIceCandidate;
   };
   enableLogging?: boolean;
+  logPrefix?: string;
   disableTrickle?: boolean;
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
@@ -78,10 +79,10 @@ export class SimplePeer {
   private pendingCandidates: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate'][] = [];
 
 
-  constructor(private readonly options: PeerOptions) {
+  constructor(private readonly options: SimplePeerInitOptions) {
     this.eventEmitter = new EventEmitter();
     this.id = v4();
-    this.debugLogger = debuglib(`peer_${this.id}`);
+    this.debugLogger = debuglib(`${options.logPrefix ? options.logPrefix : 'peer'}_${this.id}`);
     if(options.enableLogging) {
       this.debugLogger.enabled = true;
     }
@@ -152,6 +153,11 @@ export class SimplePeer {
   }
 
   // #region needsNegotiation
+  private emitSignal(payload: SignalEventPayloadType) {
+    this.debug(`signal -> ${payload.type}`);
+    this.emit('signal', payload);
+  }
+
   private needsNegotiation () {
     this.debug('_needsNegotiation');
     if (this.batchedNegotiation) return; // batch synchronous renegotiations
@@ -180,8 +186,7 @@ export class SimplePeer {
         const sendOffer = () => {
           if (this.destroyed) return;
           const signal = this.pc!.localDescription || offer;
-          this.debug('signal');
-          this.emit('signal', {
+          this.emitSignal({
             type: signal.type,
             sdp: signal.sdp ?? ''
           });
@@ -211,29 +216,25 @@ export class SimplePeer {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
 
-    if (this.options.initiator) {
-      if (this.isNegotiating) {
-        this.queuedNegotiation = true;
-        this.debug('already negotiating, queueing');
-      } else {
+    if(this.isNegotiating) {
+      this.queuedNegotiation = true;
+      this.debug('already negotiating, queueing');
+    } else {
+      if (this.options.initiator) {
         this.debug('start negotiation');
         setTimeout(() => { // HACK: Chrome crashes if we immediately call createOffer
           this.createOffer();
         }, 0);
-      }
-    } else {
-      if (this.isNegotiating) {
-        this.queuedNegotiation = true;
-        this.debug('already negotiating, queueing');
       } else {
         this.debug('requesting negotiation from initiator');
-        this.emit('signal', { // request initiator to renegotiate
+        this.emitSignal({ // request initiator to renegotiate
           type: 'renegotiate',
           renegotiate: true
         });
       }
+      this.isNegotiating = true;
     }
-    this.isNegotiating = true;
+
   }
 
   private addIceCandidate (candidate: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate']) {
@@ -258,6 +259,7 @@ export class SimplePeer {
         if (!transceiver.mid && transceiver.sender.track && !(transceiver as any).requested) {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
           (transceiver as any).requested = true; // HACK: Safari returns negotiated transceivers with a null mid
+          this.debug('requestMissingTransceivers() [non-initiator] found a missing transceiver\n\nThis happens only when the non-initiator adds/removes stream or track from the connection.');
           this.addTransceiver(transceiver.sender.track.kind);
         }
       });
@@ -276,8 +278,7 @@ export class SimplePeer {
         const sendAnswer = () => {
           if (this.destroyed) return;
           const signal = this.pc!.localDescription || answer;
-          this.debug('signal');
-          this.emit('signal', {
+          this.emitSignal({
             type: signal.type,
             sdp: signal.sdp ?? ''
           });
@@ -306,7 +307,7 @@ export class SimplePeer {
   public signal (data: SignalEventPayloadType) {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
-    this.debug('signal()');
+    this.debug(`signal(${data.type})`);
 
     switch(data.type) {
     case 'renegotiate':
@@ -390,7 +391,7 @@ export class SimplePeer {
         this.destroy(new Error('ERR_ADD_TRANSCEIVER'));
       }
     } else {
-      this.emit('signal', { // request initiator to renegotiate
+      this.emitSignal({ // request initiator to renegotiate
         type: 'transceiverRequest',
         transceiverRequest: { kind, init }
       });
@@ -459,11 +460,14 @@ export class SimplePeer {
 
   // #region setupDataChannel
 
-  private onChannelMessage (event: MessageEvent<unknown>) {
+  public sendData(data: ArrayBuffer) {
+    if(this.destroyed || !this.channelReady) return false;
+    this.channel!.send(data);
+  }
+
+  private onChannelMessage (event: MessageEvent<ArrayBuffer>) {
     if (this.destroyed) return;
-    let data = event.data;
-    if (data instanceof ArrayBuffer) data = Buffer.from(data);
-    this.emit('data', data);
+    this.emit('data', event.data);
   }
 
   private onChannelOpen() {
@@ -491,7 +495,7 @@ export class SimplePeer {
     this.channel.binaryType = 'arraybuffer';
 
     this.channel.onmessage = event => {
-      this.onChannelMessage(event);
+      this.onChannelMessage(event as MessageEvent<ArrayBuffer>);
     };
     this.channel.onopen = () => {
       this.onChannelOpen();
@@ -704,7 +708,7 @@ export class SimplePeer {
           this.connected = true;
         }
 
-        this.debug('connect');
+        this.debug('connected');
         this.emit('connect', undefined);
       });
     };
@@ -810,20 +814,22 @@ export class SimplePeer {
     if (this.pc!.signalingState === 'stable') {
       this.isNegotiating = false;
 
-      // HACK: Firefox doesn't yet support removing tracks when signalingState !== 'stable'
-      this.debug('flushing sender queue', this.sendersAwaitingStable);
-      this.sendersAwaitingStable.forEach(sender => {
-        this.pc!.removeTrack(sender);
-        this.queuedNegotiation = true;
-      });
-      this.sendersAwaitingStable = [];
+      if(this.sendersAwaitingStable.length > 0) {
+        // HACK: Firefox doesn't yet support removing tracks when signalingState !== 'stable'
+        this.debug('flushing sender queue', this.sendersAwaitingStable);
+        this.sendersAwaitingStable.forEach(sender => {
+          this.pc!.removeTrack(sender);
+          this.queuedNegotiation = true;
+        });
+        this.sendersAwaitingStable = [];
+      }
 
       if (this.queuedNegotiation) {
         this.debug('flushing negotiation queue');
         this.queuedNegotiation = false;
         this.needsNegotiation(); // negotiate again
       } else {
-        this.debug('negotiated');
+        this.debug('signaling state now stable');
         this.emit('negotiated', undefined);
       }
     }
@@ -850,7 +856,7 @@ export class SimplePeer {
   private onIceCandidate(event: RTCPeerConnectionIceEvent) {
     if (this.destroyed) return;
     if (event.candidate && !this.options.disableTrickle) {
-      this.emit('signal', {
+      this.emitSignal({
         type: 'candidate',
         candidate: {
           candidate: event.candidate.candidate,
