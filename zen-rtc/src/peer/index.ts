@@ -115,7 +115,7 @@ export class SimplePeer {
     if (typeof (this.pc as any).peerIdentity === 'object') {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unused-vars
       (this.pc as any).peerIdentity.catch((err: any) => {
-        this.destroy(new Error('ERR_PC_PEER_IDENTITY'));
+        this._destroy(new Error('ERR_PC_PEER_IDENTITY'));
       });
     }
 
@@ -200,7 +200,7 @@ export class SimplePeer {
         };
 
         const onError = () => {
-          this.destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
         };
 
         this.pc!.setLocalDescription(offer)
@@ -208,7 +208,7 @@ export class SimplePeer {
           .catch(onError);
       })
       .catch(() => {
-        this.destroy(new Error('ERR_CREATE_OFFER'));
+        this._destroy(new Error('ERR_CREATE_OFFER'));
       });
   }
 
@@ -244,7 +244,7 @@ export class SimplePeer {
         if (!iceCandidateObj.address || iceCandidateObj.address.endsWith('.local')) {
           console.warn('Ignoring unsupported ICE candidate.');
         } else {
-          this.destroy(new Error('ERR_ADD_ICE_CANDIDATE'));
+          this._destroy(new Error('ERR_ADD_ICE_CANDIDATE'));
         }
       });
   }
@@ -292,7 +292,7 @@ export class SimplePeer {
         };
 
         const onError = () => {
-          this.destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
         };
 
         this.pc!.setLocalDescription(answer)
@@ -300,7 +300,7 @@ export class SimplePeer {
           .catch(onError);
       })
       .catch(() => {
-        this.destroy(new Error('ERR_CREATE_ANSWER'));
+        this._destroy(new Error('ERR_CREATE_ANSWER'));
       });
   }
 
@@ -343,11 +343,11 @@ export class SimplePeer {
           if (this.pc!.remoteDescription?.type === 'offer') this.createAnswer();
         })
         .catch(() => {
-          this.destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
         });
       break;
     default:
-      this.destroy(new Error('signal() called with invalid signal data'));
+      this._destroy(new Error('signal() called with invalid signal data'));
     }
   }
   // #endregion
@@ -388,7 +388,7 @@ export class SimplePeer {
         this.pc!.addTransceiver(kind, init);
         this.needsNegotiation();
       } catch (err) {
-        this.destroy(new Error('ERR_ADD_TRANSCEIVER'));
+        this._destroy(new Error('ERR_ADD_TRANSCEIVER'));
       }
     } else {
       this.emitSignal({ // request initiator to renegotiate
@@ -442,7 +442,7 @@ export class SimplePeer {
       if (err.name === 'NS_ERROR_UNEXPECTED') {
         this.sendersAwaitingStable.push(sender); // HACK: Firefox must wait until (signalingState === stable) https://bugzilla.mozilla.org/show_bug.cgi?id=1133874
       } else {
-        this.destroy(new Error('ERR_REMOVE_TRACK'));
+        this._destroy(new Error('ERR_REMOVE_TRACK'));
       }
     }
     this.needsNegotiation();
@@ -480,7 +480,7 @@ export class SimplePeer {
   private onChannelClose () {
     if (this.destroyed) return;
     this.debug('on channel close');
-    this.destroy();
+    this._destroy();
   }
 
   private setupDataChannel(event: { channel: RTCDataChannel; }) {
@@ -488,7 +488,7 @@ export class SimplePeer {
       // In some situations `pc.createDataChannel()` returns `undefined` (in wrtc),
       // which is invalid behavior. Handle it gracefully.
       // See: https://github.com/feross/simple-peer/issues/163
-      return this.destroy(new Error('ERR_DATA_CHANNEL'));
+      return this._destroy(new Error('ERR_DATA_CHANNEL'));
     }
 
     this.channel = event.channel;
@@ -505,7 +505,7 @@ export class SimplePeer {
     };
     this.channel.onerror = (ev) => {
       const event = ev as RTCErrorEvent;
-      this.destroy(event.error ?? new Error('ERR_DATA_CHANNEL_ON_ERROR'));
+      this._destroy(event.error ?? new Error('ERR_DATA_CHANNEL_ON_ERROR'));
     };
 
     // HACK: Chrome will sometimes get stuck in readyState "closing", let's check for this condition
@@ -735,16 +735,19 @@ export class SimplePeer {
       this.waitForCandidatePair();
     }
     if (iceConnectionState === 'failed') {
-      this.destroy(new Error('ERR_ICE_CONNECTION_FAILURE'));
+      this._destroy(new Error('ERR_ICE_CONNECTION_FAILURE'));
     }
     if (iceConnectionState === 'closed') {
-      this.destroy(new Error('ERR_ICE_CONNECTION_CLOSED'));
+      this._destroy(new Error('ERR_ICE_CONNECTION_CLOSED'));
     }
   }
 
   // #endregion
+  public destroy() {
+    this._destroy();
+  }
 
-  private destroy(err?: Error) {
+  private _destroy(err?: Error) {
     if (this.destroyed || this.destroying) return;
     this.destroying = true;
 
@@ -804,7 +807,7 @@ export class SimplePeer {
   private onConnectionStateChange() {
     if (this.destroyed) return;
     if (this.pc!.connectionState === 'failed') {
-      this.destroy(new Error('ERR_CONNECTION_FAILURE'));
+      this._destroy(new Error('ERR_CONNECTION_FAILURE'));
     }
   }
 
@@ -882,6 +885,10 @@ export class SimplePeer {
 
   private emit<K extends keyof PeerEvents>(eventName: K, payload: PeerEvents[K]): void {
     this.eventEmitter.emit(eventName, payload);
+  }
+
+  public removeAllListeners() {
+    this.eventEmitter.removeAllListeners();
   }
 
 }
