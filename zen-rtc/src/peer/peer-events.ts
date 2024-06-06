@@ -36,7 +36,7 @@ type PeerEventsMap = {
   payload: undefined
 } | {
   eventName: 'data',
-  payload: unknown
+  payload: ArrayBuffer
 } | {
   eventName: 'track',
   payload: {

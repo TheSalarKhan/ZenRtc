@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "sourceMap": true,
+    "strict": true,
+    "module": "es6",
+    "target": "es5",
+    "jsx": "react",
+    "allowJs": true,
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "*": ["src/*"], // local src
+      "@zen-rtc/*": ["../zen-rtc/src/*"] // zen-rtc src
+    }
+  },
+  "include": [
+    "./src/**/*",
+    "../zen-rtc/src/**/*"
+  ]
+}

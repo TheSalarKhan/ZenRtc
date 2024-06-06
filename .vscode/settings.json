@@ -1,6 +1,7 @@
 {
   "eslint.workingDirectories": [
     "./zen-rtc",
+    "./development-playground"
   ],
   "editor.codeActionsOnSave": {
     "source.fixAll.eslint": true

@@ -2,10 +2,8 @@ import { EventEmitter } from 'eventemitter3';
 import { PeerEvents, SignalEventPayloadType } from './peer-events';
 import { v4 } from 'uuid';
 import debuglib from 'debug';
-import { filterTrickle } from './filter-trickle';
+import { removeTrickle } from './remove-trickle';
 
-
-const debugLogger = debuglib('peer');
 
 const CHANNEL_CLOSING_TIMEOUT = 5 * 1000;
 const ICECOMPLETE_TIMEOUT = 5 * 1000;
@@ -29,14 +27,16 @@ interface GetStatsItem {
   googRemoteAddress?: string;
 }
 
-export interface PeerOptions {
+export interface SimplePeerInitOptions {
   initiator: boolean;
   wrtc: {
     RTCPeerConnection: typeof RTCPeerConnection;
     RTCSessionDescription: typeof RTCSessionDescription;
     RTCIceCandidate: typeof RTCIceCandidate;
   };
-  trickle?: boolean;
+  enableLogging?: boolean;
+  logPrefix?: string;
+  disableTrickle?: boolean;
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
   config?: RTCConfiguration;
@@ -50,6 +50,9 @@ export class SimplePeer {
   private eventEmitter: EventEmitter;
   private pc: RTCPeerConnection | null;
   private id: string;
+  private debugLogger: debuglib.Debugger;
+  private textEncoder: TextEncoder;
+  private textDecoder: TextDecoder;
   // state keeping variables
   private destroyed = false;
   private destroying = false;
@@ -78,9 +81,15 @@ export class SimplePeer {
   private pendingCandidates: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate'][] = [];
 
 
-  constructor(private readonly options: PeerOptions) {
+  constructor(private readonly options: SimplePeerInitOptions) {
     this.eventEmitter = new EventEmitter();
     this.id = v4();
+    this.debugLogger = debuglib(`${options.logPrefix ? options.logPrefix : 'peer'}_${this.id}`);
+    if(options.enableLogging) {
+      this.debugLogger.enabled = true;
+    }
+    this.textEncoder = new TextEncoder();
+    this.textDecoder = new TextDecoder('utf-8');
 
     const { RTCPeerConnection } = this.options.wrtc;
     // create the peer connection
@@ -110,7 +119,7 @@ export class SimplePeer {
     if (typeof (this.pc as any).peerIdentity === 'object') {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unused-vars
       (this.pc as any).peerIdentity.catch((err: any) => {
-        this.destroy(new Error('ERR_PC_PEER_IDENTITY'));
+        this._destroy(new Error('ERR_PC_PEER_IDENTITY'));
       });
     }
 
@@ -148,6 +157,23 @@ export class SimplePeer {
   }
 
   // #region needsNegotiation
+  private emitSignal(payload: SignalEventPayloadType) {
+    if(this.channelReady && this.connected && this.channel) {
+      const message = {
+        type: 'zen-signal-message',
+        payload
+      };
+      const jsonString = JSON.stringify(message);
+      this.debug(`signal<via-data-channel> -> ${payload.type}`);
+      // assuming the encoded string will always be under 16KiB
+      // which is a sane size for a single `sendData`.
+      this.sendData(this.textEncoder.encode(jsonString));
+      return;
+    }
+    this.debug(`signal -> ${payload.type}`);
+    this.emit('signal', payload);
+  }
+
   private needsNegotiation () {
     this.debug('_needsNegotiation');
     if (this.batchedNegotiation) return; // batch synchronous renegotiations
@@ -170,14 +196,13 @@ export class SimplePeer {
     this.pc!.createOffer(this.options.offerOptions)
       .then(offer => {
         if (this.destroyed || !offer.sdp) return;
-        if (!this.options.trickle) offer.sdp = filterTrickle(offer.sdp);
+        if (this.options.disableTrickle === true) offer.sdp = removeTrickle(offer.sdp);
         offer.sdp = this.options.sdpTransform ? this.options.sdpTransform(offer.sdp) : offer.sdp;
 
         const sendOffer = () => {
           if (this.destroyed) return;
           const signal = this.pc!.localDescription || offer;
-          this.debug('signal');
-          this.emit('signal', {
+          this.emitSignal({
             type: signal.type,
             sdp: signal.sdp ?? ''
           });
@@ -186,12 +211,12 @@ export class SimplePeer {
         const onSuccess = () => {
           this.debug('createOffer success');
           if (this.destroyed) return;
-          if (this.options.trickle || this.iceComplete) sendOffer();
+          if (!this.options.disableTrickle || this.iceComplete) sendOffer();
           else this.eventEmitter.once('_iceComplete', sendOffer); // wait for candidates
         };
 
         const onError = () => {
-          this.destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
         };
 
         this.pc!.setLocalDescription(offer)
@@ -199,7 +224,7 @@ export class SimplePeer {
           .catch(onError);
       })
       .catch(() => {
-        this.destroy(new Error('ERR_CREATE_OFFER'));
+        this._destroy(new Error('ERR_CREATE_OFFER'));
       });
   }
 
@@ -207,29 +232,25 @@ export class SimplePeer {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
 
-    if (this.options.initiator) {
-      if (this.isNegotiating) {
-        this.queuedNegotiation = true;
-        this.debug('already negotiating, queueing');
-      } else {
+    if(this.isNegotiating) {
+      this.queuedNegotiation = true;
+      this.debug('already negotiating, queueing');
+    } else {
+      if (this.options.initiator) {
         this.debug('start negotiation');
         setTimeout(() => { // HACK: Chrome crashes if we immediately call createOffer
           this.createOffer();
         }, 0);
-      }
-    } else {
-      if (this.isNegotiating) {
-        this.queuedNegotiation = true;
-        this.debug('already negotiating, queueing');
       } else {
         this.debug('requesting negotiation from initiator');
-        this.emit('signal', { // request initiator to renegotiate
+        this.emitSignal({ // request initiator to renegotiate
           type: 'renegotiate',
           renegotiate: true
         });
       }
+      this.isNegotiating = true;
     }
-    this.isNegotiating = true;
+
   }
 
   private addIceCandidate (candidate: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate']) {
@@ -239,7 +260,7 @@ export class SimplePeer {
         if (!iceCandidateObj.address || iceCandidateObj.address.endsWith('.local')) {
           console.warn('Ignoring unsupported ICE candidate.');
         } else {
-          this.destroy(new Error('ERR_ADD_ICE_CANDIDATE'));
+          this._destroy(new Error('ERR_ADD_ICE_CANDIDATE'));
         }
       });
   }
@@ -254,6 +275,7 @@ export class SimplePeer {
         if (!transceiver.mid && transceiver.sender.track && !(transceiver as any).requested) {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
           (transceiver as any).requested = true; // HACK: Safari returns negotiated transceivers with a null mid
+          this.debug('requestMissingTransceivers() [non-initiator] found a missing transceiver\n\nThis happens only when the non-initiator adds/removes stream or track from the connection.');
           this.addTransceiver(transceiver.sender.track.kind);
         }
       });
@@ -266,14 +288,13 @@ export class SimplePeer {
     this.pc!.createAnswer(this.options.answerOptions)
       .then(answer => {
         if (this.destroyed || !answer.sdp) return;
-        if (!this.options.trickle) answer.sdp = filterTrickle(answer.sdp);
+        if (this.options.disableTrickle === true) answer.sdp = removeTrickle(answer.sdp);
         answer.sdp = this.options.sdpTransform ? this.options.sdpTransform(answer.sdp) : answer.sdp;
 
         const sendAnswer = () => {
           if (this.destroyed) return;
           const signal = this.pc!.localDescription || answer;
-          this.debug('signal');
-          this.emit('signal', {
+          this.emitSignal({
             type: signal.type,
             sdp: signal.sdp ?? ''
           });
@@ -282,12 +303,12 @@ export class SimplePeer {
 
         const onSuccess = () => {
           if (this.destroyed) return;
-          if (this.options.trickle || this.iceComplete) sendAnswer();
+          if (!this.options.disableTrickle || this.iceComplete) sendAnswer();
           else this.eventEmitter.once('_iceComplete', sendAnswer);
         };
 
         const onError = () => {
-          this.destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
         };
 
         this.pc!.setLocalDescription(answer)
@@ -295,14 +316,14 @@ export class SimplePeer {
           .catch(onError);
       })
       .catch(() => {
-        this.destroy(new Error('ERR_CREATE_ANSWER'));
+        this._destroy(new Error('ERR_CREATE_ANSWER'));
       });
   }
 
   public signal (data: SignalEventPayloadType) {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
-    this.debug('signal()');
+    this.debug(`signal(${data.type})`);
 
     switch(data.type) {
     case 'renegotiate':
@@ -338,11 +359,11 @@ export class SimplePeer {
           if (this.pc!.remoteDescription?.type === 'offer') this.createAnswer();
         })
         .catch(() => {
-          this.destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
+          this._destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
         });
       break;
     default:
-      this.destroy(new Error('signal() called with invalid signal data'));
+      this._destroy(new Error('signal() called with invalid signal data'));
     }
   }
   // #endregion
@@ -383,10 +404,10 @@ export class SimplePeer {
         this.pc!.addTransceiver(kind, init);
         this.needsNegotiation();
       } catch (err) {
-        this.destroy(new Error('ERR_ADD_TRANSCEIVER'));
+        this._destroy(new Error('ERR_ADD_TRANSCEIVER'));
       }
     } else {
-      this.emit('signal', { // request initiator to renegotiate
+      this.emitSignal({ // request initiator to renegotiate
         type: 'transceiverRequest',
         transceiverRequest: { kind, init }
       });
@@ -437,7 +458,7 @@ export class SimplePeer {
       if (err.name === 'NS_ERROR_UNEXPECTED') {
         this.sendersAwaitingStable.push(sender); // HACK: Firefox must wait until (signalingState === stable) https://bugzilla.mozilla.org/show_bug.cgi?id=1133874
       } else {
-        this.destroy(new Error('ERR_REMOVE_TRACK'));
+        this._destroy(new Error('ERR_REMOVE_TRACK'));
       }
     }
     this.needsNegotiation();
@@ -455,11 +476,47 @@ export class SimplePeer {
 
   // #region setupDataChannel
 
-  private onChannelMessage (event: MessageEvent<unknown>) {
+  public sendData(data: ArrayBuffer) {
+    if(this.destroyed || !this.channelReady) return false;
+    this.channel!.send(data);
+  }
+
+  private isMessageSignal(event: MessageEvent<ArrayBuffer>) {
+    // What's happening here?
+    // In this function we want to distinguish between the message
+    // being a signaling message as opposed to a user message.
+    // To do this we check if the message starts with `{"type": "zen-signal-message"`
+    // we don't convert to a string and parse to json to save memory.
+    const eventData = new Uint8Array(event.data);
+    const prefix = new Uint8Array([
+      // {
+      123,
+      // "type":
+      34, 116, 121, 112, 101, 34, 58,
+      // "zen-signal-message"
+      34, 122, 101, 110, 45, 115, 105, 103, 110, 97, 108, 45,
+      109, 101, 115, 115,  97, 103, 101, 34
+    ]);
+    if(eventData.length > prefix.length) {
+      const prefixDoesNotMatch = prefix.some((value, idx) => eventData.at(idx) !== value);
+      const prefixMatches = !prefixDoesNotMatch;
+      return prefixMatches;
+    }
+    return false;
+  }
+
+  private onChannelMessage (event: MessageEvent<ArrayBuffer>) {
     if (this.destroyed) return;
-    let data = event.data;
-    if (data instanceof ArrayBuffer) data = Buffer.from(data);
-    this.emit('data', data);
+    // the data received could be a signaling message, in which case
+    // we will emit the 'signal' event and not 'data'.
+    const isSignal = this.isMessageSignal(event);
+    if(isSignal) {
+      const decoded = this.textDecoder.decode(event.data);
+      const parsed = JSON.parse(decoded) as { payload: SignalEventPayloadType };
+      this.signal(parsed.payload);
+      return;
+    }
+    this.emit('data', event.data);
   }
 
   private onChannelOpen() {
@@ -472,7 +529,7 @@ export class SimplePeer {
   private onChannelClose () {
     if (this.destroyed) return;
     this.debug('on channel close');
-    this.destroy();
+    this._destroy();
   }
 
   private setupDataChannel(event: { channel: RTCDataChannel; }) {
@@ -480,14 +537,14 @@ export class SimplePeer {
       // In some situations `pc.createDataChannel()` returns `undefined` (in wrtc),
       // which is invalid behavior. Handle it gracefully.
       // See: https://github.com/feross/simple-peer/issues/163
-      return this.destroy(new Error('ERR_DATA_CHANNEL'));
+      return this._destroy(new Error('ERR_DATA_CHANNEL'));
     }
 
     this.channel = event.channel;
     this.channel.binaryType = 'arraybuffer';
 
     this.channel.onmessage = event => {
-      this.onChannelMessage(event);
+      this.onChannelMessage(event as MessageEvent<ArrayBuffer>);
     };
     this.channel.onopen = () => {
       this.onChannelOpen();
@@ -497,7 +554,7 @@ export class SimplePeer {
     };
     this.channel.onerror = (ev) => {
       const event = ev as RTCErrorEvent;
-      this.destroy(event.error ?? new Error('ERR_DATA_CHANNEL_ON_ERROR'));
+      this._destroy(event.error ?? new Error('ERR_DATA_CHANNEL_ON_ERROR'));
     };
 
     // HACK: Chrome will sometimes get stuck in readyState "closing", let's check for this condition
@@ -528,8 +585,7 @@ export class SimplePeer {
     // eslint-disable-next-line prefer-rest-params
     // const args: unknown[] = [].slice.call(arguments);
     // eslint-disable-next-line @typescript-eslint/restrict-plus-operands
-    args[0] = '[' + this.id + '] ' + args[0];
-    debugLogger(null, ...args);
+    this.debugLogger(args[0], ...args.slice(1));
   }
 
   // #region IceStateChange
@@ -701,7 +757,7 @@ export class SimplePeer {
           this.connected = true;
         }
 
-        this.debug('connect');
+        this.debug('connected');
         this.emit('connect', undefined);
       });
     };
@@ -728,16 +784,19 @@ export class SimplePeer {
       this.waitForCandidatePair();
     }
     if (iceConnectionState === 'failed') {
-      this.destroy(new Error('ERR_ICE_CONNECTION_FAILURE'));
+      this._destroy(new Error('ERR_ICE_CONNECTION_FAILURE'));
     }
     if (iceConnectionState === 'closed') {
-      this.destroy(new Error('ERR_ICE_CONNECTION_CLOSED'));
+      this._destroy(new Error('ERR_ICE_CONNECTION_CLOSED'));
     }
   }
 
   // #endregion
+  public destroy() {
+    this._destroy();
+  }
 
-  private destroy(err?: Error) {
+  private _destroy(err?: Error) {
     if (this.destroyed || this.destroying) return;
     this.destroying = true;
 
@@ -797,7 +856,7 @@ export class SimplePeer {
   private onConnectionStateChange() {
     if (this.destroyed) return;
     if (this.pc!.connectionState === 'failed') {
-      this.destroy(new Error('ERR_CONNECTION_FAILURE'));
+      this._destroy(new Error('ERR_CONNECTION_FAILURE'));
     }
   }
 
@@ -807,20 +866,22 @@ export class SimplePeer {
     if (this.pc!.signalingState === 'stable') {
       this.isNegotiating = false;
 
-      // HACK: Firefox doesn't yet support removing tracks when signalingState !== 'stable'
-      this.debug('flushing sender queue', this.sendersAwaitingStable);
-      this.sendersAwaitingStable.forEach(sender => {
-        this.pc!.removeTrack(sender);
-        this.queuedNegotiation = true;
-      });
-      this.sendersAwaitingStable = [];
+      if(this.sendersAwaitingStable.length > 0) {
+        // HACK: Firefox doesn't yet support removing tracks when signalingState !== 'stable'
+        this.debug('flushing sender queue', this.sendersAwaitingStable);
+        this.sendersAwaitingStable.forEach(sender => {
+          this.pc!.removeTrack(sender);
+          this.queuedNegotiation = true;
+        });
+        this.sendersAwaitingStable = [];
+      }
 
       if (this.queuedNegotiation) {
         this.debug('flushing negotiation queue');
         this.queuedNegotiation = false;
         this.needsNegotiation(); // negotiate again
       } else {
-        this.debug('negotiated');
+        this.debug('signaling state now stable');
         this.emit('negotiated', undefined);
       }
     }
@@ -846,8 +907,8 @@ export class SimplePeer {
 
   private onIceCandidate(event: RTCPeerConnectionIceEvent) {
     if (this.destroyed) return;
-    if (event.candidate && this.options.trickle) {
-      this.emit('signal', {
+    if (event.candidate && !this.options.disableTrickle) {
+      this.emitSignal({
         type: 'candidate',
         candidate: {
           candidate: event.candidate.candidate,
@@ -873,6 +934,10 @@ export class SimplePeer {
 
   private emit<K extends keyof PeerEvents>(eventName: K, payload: PeerEvents[K]): void {
     this.eventEmitter.emit(eventName, payload);
+  }
+
+  public removeAllListeners() {
+    this.eventEmitter.removeAllListeners();
   }
 
 }
