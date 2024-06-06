@@ -16,7 +16,7 @@ module.exports = {
   resolve: {
     extensions: ['.ts', '.js'],
     alias: {
-      '@zen-rtc': path.resolve(__dirname, '../../zen-rtc/src') // Ensure alias matches tsconfig.json paths
+      '@zen-rtc': path.resolve(__dirname, '../zen-rtc/src') // Ensure alias matches tsconfig.json paths
     },
     modules: [
       path.resolve(__dirname, 'src'),
@@ -40,7 +40,7 @@ module.exports = {
     compress: true,
     port: 9000,
     watchFiles: [
-      path.resolve(__dirname, '../../zen-rtc/src/**/*') // Add this line to watch for changes in the external library
+      path.resolve(__dirname, '../zen-rtc/src/**/*') // Add this line to watch for changes in the external library
     ]
   },
 };

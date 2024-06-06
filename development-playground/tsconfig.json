@@ -13,11 +13,11 @@
     "baseUrl": ".",
     "paths": {
       "*": ["src/*"], // local src
-      "@zen-rtc/*": ["../../zen-rtc/src/*"] // zen-rtc src
+      "@zen-rtc/*": ["../zen-rtc/src/*"] // zen-rtc src
     }
   },
   "include": [
     "./src/**/*",
-    "../../zen-rtc/src/**/*"
+    "../zen-rtc/src/**/*"
   ]
 }
