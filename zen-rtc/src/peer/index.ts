@@ -51,6 +51,8 @@ export class SimplePeer {
   private pc: RTCPeerConnection | null;
   private id: string;
   private debugLogger: debuglib.Debugger;
+  private textEncoder: TextEncoder;
+  private textDecoder: TextDecoder;
   // state keeping variables
   private destroyed = false;
   private destroying = false;
@@ -86,6 +88,8 @@ export class SimplePeer {
     if(options.enableLogging) {
       this.debugLogger.enabled = true;
     }
+    this.textEncoder = new TextEncoder();
+    this.textDecoder = new TextDecoder('utf-8');
 
     const { RTCPeerConnection } = this.options.wrtc;
     // create the peer connection
@@ -154,6 +158,18 @@ export class SimplePeer {
 
   // #region needsNegotiation
   private emitSignal(payload: SignalEventPayloadType) {
+    if(this.channelReady && this.connected && this.channel) {
+      const message = {
+        type: 'zen-signal-message',
+        payload
+      };
+      const jsonString = JSON.stringify(message);
+      this.debug(`signal<via-data-channel> -> ${payload.type}`);
+      // assuming the encoded string will always be under 16KiB
+      // which is a sane size for a single `sendData`.
+      this.sendData(this.textEncoder.encode(jsonString));
+      return;
+    }
     this.debug(`signal -> ${payload.type}`);
     this.emit('signal', payload);
   }
@@ -465,8 +481,41 @@ export class SimplePeer {
     this.channel!.send(data);
   }
 
+  private isMessageSignal(event: MessageEvent<ArrayBuffer>) {
+    // What's happening here?
+    // In this function we want to distinguish between the message
+    // being a signaling message as opposed to a user message.
+    // To do this we check if the message starts with `{"type": "zen-signal-message"`
+    // we don't convert to a string and parse to json to save memory.
+    const eventData = new Uint8Array(event.data);
+    const prefix = new Uint8Array([
+      // {
+      123,
+      // "type":
+      34, 116, 121, 112, 101, 34, 58,
+      // "zen-signal-message"
+      34, 122, 101, 110, 45, 115, 105, 103, 110, 97, 108, 45,
+      109, 101, 115, 115,  97, 103, 101, 34
+    ]);
+    if(eventData.length > prefix.length) {
+      const prefixDoesNotMatch = prefix.some((value, idx) => eventData.at(idx) !== value);
+      const prefixMatches = !prefixDoesNotMatch;
+      return prefixMatches;
+    }
+    return false;
+  }
+
   private onChannelMessage (event: MessageEvent<ArrayBuffer>) {
     if (this.destroyed) return;
+    // the data received could be a signaling message, in which case
+    // we will emit the 'signal' event and not 'data'.
+    const isSignal = this.isMessageSignal(event);
+    if(isSignal) {
+      const decoded = this.textDecoder.decode(event.data);
+      const parsed = JSON.parse(decoded) as { payload: SignalEventPayloadType };
+      this.signal(parsed.payload);
+      return;
+    }
     this.emit('data', event.data);
   }
 

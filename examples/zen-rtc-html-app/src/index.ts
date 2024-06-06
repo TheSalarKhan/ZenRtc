@@ -63,7 +63,7 @@ async function main() {
   peer2.on('connect', () => {
     console.log('peer2 connected');
     peer2.sendData(textEncoder.encode('Hello peer1!').buffer);
-    // peer2.addStream(cameraStream);
+    peer2.addStream(cameraStream);
   });
   peer2.on('signal', (payload) => {
     peer1.signal(payload);
