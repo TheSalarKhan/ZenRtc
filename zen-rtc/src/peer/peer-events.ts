@@ -45,9 +45,7 @@ type PeerEventsMap = {
   }
 } | {
   eventName: 'stream',
-  payload: {
-    stream: MediaStream
-  }
+  payload: MediaStream
 } | {
   eventName: 'signal',
   payload: SignalEventPayloadType

@@ -389,7 +389,7 @@ export class SimplePeer {
 
       queueMicrotask(() => {
         this.debug('on stream');
-        this.emit('stream', { stream: mediaStream }); // ensure all tracks have been added
+        this.emit('stream', mediaStream); // ensure all tracks have been added
       });
     });
   }
@@ -513,6 +513,7 @@ export class SimplePeer {
     if(isSignal) {
       const decoded = this.textDecoder.decode(event.data);
       const parsed = JSON.parse(decoded) as { payload: SignalEventPayloadType };
+      this.debug(`signal(${parsed.payload.type}) received via data-channel`);
       this.signal(parsed.payload);
       return;
     }
@@ -938,6 +939,10 @@ export class SimplePeer {
 
   public removeAllListeners() {
     this.eventEmitter.removeAllListeners();
+  }
+
+  public getRTCPeerConnection() {
+    return this.pc;
   }
 
 }

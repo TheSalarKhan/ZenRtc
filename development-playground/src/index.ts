@@ -56,7 +56,7 @@ async function main() {
     console.log('got data from peer2');
     console.log(textDecoder.decode(payload));
   });
-  peer1.on('stream', ({ stream }) => {
+  peer1.on('stream', (stream) => {
     remoteVideo1.srcObject = stream;
   });
 
@@ -72,7 +72,7 @@ async function main() {
     console.log('got data from peer1');
     console.log(textDecoder.decode(payload));
   });
-  peer2.on('stream', ({ stream }) => {
+  peer2.on('stream', (stream) => {
     remoteVideo2.srcObject = stream;
   });
 
