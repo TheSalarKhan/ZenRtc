@@ -30,6 +30,7 @@
     "@types/debug": "^4.1.12",
     "debug": "^4.3.5",
     "eventemitter3": "^5.0.1",
+    "fast-text-encoding": "^1.0.6",
     "uuid": "^9.0.1"
   }
 }

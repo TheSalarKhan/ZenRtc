@@ -1,3 +1,4 @@
+import 'fast-text-encoding';
 import { EventEmitter } from 'eventemitter3';
 import { PeerEvents, SignalEventPayloadType } from './peer-events';
 import { v4 } from 'uuid';
@@ -418,9 +419,17 @@ export class SimplePeer {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
     this.debug('addStream()');
-    stream.getTracks().forEach(track => {
-      this.addTrack(track, stream);
-    });
+    if(this.pc!.addTrack != null) {
+      stream.getTracks().forEach(track => {
+        this.addTrack(track, stream);
+      });
+    } else {
+      /* logic to support react-native-webrtc */
+      type ReactNativeRTCPeerConnection = RTCPeerConnection & { addStream: (stream: MediaStream) => void };
+      const pcForReactNative = this.pc! as ReactNativeRTCPeerConnection;
+      pcForReactNative.addStream(stream);
+      this.needsNegotiation();
+    }
   }
 
   public addTrack (track: MediaStreamTrack, stream: MediaStream) {
