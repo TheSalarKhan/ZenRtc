@@ -1,3 +1,4 @@
+import 'fast-text-encoding';
 import { EventEmitter } from 'eventemitter3';
 import { PeerEvents, SignalEventPayloadType } from './peer-events';
 import { v4 } from 'uuid';
@@ -389,7 +390,7 @@ export class SimplePeer {
 
       queueMicrotask(() => {
         this.debug('on stream');
-        this.emit('stream', { stream: mediaStream }); // ensure all tracks have been added
+        this.emit('stream', mediaStream); // ensure all tracks have been added
       });
     });
   }
@@ -418,9 +419,17 @@ export class SimplePeer {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
     this.debug('addStream()');
-    stream.getTracks().forEach(track => {
-      this.addTrack(track, stream);
-    });
+    if(this.pc!.addTrack != null) {
+      stream.getTracks().forEach(track => {
+        this.addTrack(track, stream);
+      });
+    } else {
+      /* logic to support react-native-webrtc */
+      type ReactNativeRTCPeerConnection = RTCPeerConnection & { addStream: (stream: MediaStream) => void };
+      const pcForReactNative = this.pc! as ReactNativeRTCPeerConnection;
+      pcForReactNative.addStream(stream);
+      this.needsNegotiation();
+    }
   }
 
   public addTrack (track: MediaStreamTrack, stream: MediaStream) {
@@ -513,6 +522,7 @@ export class SimplePeer {
     if(isSignal) {
       const decoded = this.textDecoder.decode(event.data);
       const parsed = JSON.parse(decoded) as { payload: SignalEventPayloadType };
+      this.debug(`signal(${parsed.payload.type}) received via data-channel`);
       this.signal(parsed.payload);
       return;
     }
@@ -938,6 +948,10 @@ export class SimplePeer {
 
   public removeAllListeners() {
     this.eventEmitter.removeAllListeners();
+  }
+
+  public getRTCPeerConnection() {
+    return this.pc;
   }
 
 }
