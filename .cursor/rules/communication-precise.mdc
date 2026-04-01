@@ -1,0 +1,12 @@
+---
+description: User-facing replies — precise, concise, no repetition
+alwaysApply: true
+---
+
+# Communication with the user
+
+- Be **precise and direct**. Say what changed, what it means, and what’s next only if needed.
+- **Avoid repetition**: do not restate the same point in multiple paragraphs or bullet lists.
+- **Avoid long-form filler**: skip ornate lead-ins, stacked disclaimers, and “as we discussed” padding unless the user asked for narrative context.
+- Prefer **short sentences** and **tight structure** (headings/bullets only when they aid scanning).
+- Do not **over-explain** obvious steps or re-summarize the entire task after every edit unless the user asked for a recap.
