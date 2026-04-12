@@ -67,10 +67,6 @@ export class SimplePeer {
   private connected = false;
   private connecting = false;
   private isReactNativeWebrtc = false;
-  private localAddress?: string;
-  private localPort?: number;
-  private remoteAddress?: string;
-  private remotePort?: number;
   private channel?: RTCDataChannel | null = null;
   private closingInterval?: ReturnType<typeof setInterval>;
   private senderMap: Map<MediaStreamTrack, Map<MediaStream, RTCRtpSender>> = new Map();
@@ -583,6 +579,7 @@ export class SimplePeer {
 
   /* eslint-disable */
   // TODO: Need to refactor this function it has been copied and pasted as is.
+  // there's allot of any used, we can perhaps use some types.
   private getStats(cb: (error?: any, items?: GetStatsItem[]) => void) {
     // statreports can come with a value array instead of properties
     const flattenValues = (report:any) => {
@@ -657,6 +654,8 @@ export class SimplePeer {
         const candidatePairs: { [k: string]: GetStatsItem } = {};
         let foundSelectedCandidatePair = false;
 
+        // extract all candidate types (local, remote, candidate pairs) and populate them
+        // in the arrays above.
         items?.forEach(item => {
           // TODO: Once all browsers support the hyphenated stats report types, remove
           // the non-hypenated ones
@@ -671,56 +670,64 @@ export class SimplePeer {
           }
         });
 
-        const setSelectedCandidatePair = (selectedCandidatePair: GetStatsItem) => {
+        const logSelectedCandidatePairInfo = (selectedCandidatePair: GetStatsItem | undefined) => {
+          if (!selectedCandidatePair) return;
           foundSelectedCandidatePair = true;
+
+          let localAddress: string | undefined;
+          let localPort: number | undefined;
+          let remoteAddress: string | undefined;
+          let remotePort: number | undefined;
 
           const local = localCandidates[selectedCandidatePair.localCandidateId as string];
 
           if (local && (local.ip || local.address)) {
             // Spec
-            this.localAddress = local.ip || local.address;
-            this.localPort = Number(local.port);
+            localAddress = local.ip || local.address;
+            localPort = Number(local.port);
           } else if (local && local.ipAddress) {
             // Firefox
-            this.localAddress = local.ipAddress;
-            this.localPort = Number(local.portNumber);
+            localAddress = local.ipAddress;
+            localPort = Number(local.portNumber);
           } else if (typeof selectedCandidatePair.googLocalAddress === 'string') {
             // TODO: remove this once Chrome 58 is released
-            const local = selectedCandidatePair.googLocalAddress.split(':');
-            this.localAddress = local[0];
-            this.localPort = Number(local[1]);
+            const parts = selectedCandidatePair.googLocalAddress.split(':');
+            localAddress = parts[0];
+            localPort = Number(parts[1]);
           }
 
           const remote = remoteCandidates[selectedCandidatePair.remoteCandidateId as string];
 
           if (remote && (remote.ip || remote.address)) {
             // Spec
-            this.remoteAddress = remote.ip || remote.address;
-            this.remotePort = Number(remote.port);
+            remoteAddress = remote.ip || remote.address;
+            remotePort = Number(remote.port);
           } else if (remote && remote.ipAddress) {
             // Firefox
-            this.remoteAddress = remote.ipAddress;
-            this.remotePort = Number(remote.portNumber);
+            remoteAddress = remote.ipAddress;
+            remotePort = Number(remote.portNumber);
           } else if (typeof selectedCandidatePair.googRemoteAddress === 'string') {
             // TODO: remove this once Chrome 58 is released
-            const remote = selectedCandidatePair.googRemoteAddress.split(':');
-            this.remoteAddress = remote[0];
-            this.remotePort = Number(remote[1]);
+            const parts = selectedCandidatePair.googRemoteAddress.split(':');
+            remoteAddress = parts[0];
+            remotePort = Number(parts[1]);
           }
 
           this.debug(
             'connect local: %s:%s remote: %s:%s',
-            this.localAddress,
-            this.localPort,
-            this.remoteAddress,
-            this.remotePort
+            localAddress,
+            localPort,
+            remoteAddress,
+            remotePort
           );
         };
 
+        // now go through all transport stats report items
+        // and find the ones that have selected candidate pairs.
         items?.forEach(item => {
           // Spec-compliant
           if (item.type === 'transport' && item.selectedCandidatePairId) {
-            setSelectedCandidatePair(candidatePairs[item.selectedCandidatePairId]);
+            logSelectedCandidatePairInfo(candidatePairs[item.selectedCandidatePairId]);
           }
 
           // Old implementations
@@ -728,7 +735,7 @@ export class SimplePeer {
             (item.type === 'googCandidatePair' && item.googActiveConnection === 'true') ||
             ((item.type === 'candidatepair' || item.type === 'candidate-pair') && item.selected)
           ) {
-            setSelectedCandidatePair(item);
+            logSelectedCandidatePairInfo(item);
           }
         });
 
