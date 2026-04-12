@@ -41,8 +41,6 @@ export interface SimplePeerInitOptions {
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
   config?: RTCConfiguration;
-  offerOptions?: RTCOfferOptions;
-  answerOptions?: RTCAnswerOptions;
   sdpTransform?: (sdp: string) => string;
   iceCompleteTimeout?: number;
 }
@@ -191,52 +189,37 @@ export class SimplePeer {
       return;
     }
     this.isNegotiating = true;
+    this.makingOffer = true;
     this.debug('start negotiation (onnegotiationneeded)');
-    setTimeout(() => { // HACK: Chrome crashes if we immediately call createOffer
-      if (this.destroyed) return;
-      this.makingOffer = true;
-      void this.createOffer().finally(() => {
-        this.makingOffer = false;
-      });
-    }, 0);
-  }
-
-  private async createOffer () {
-    if (this.destroyed) return Promise.resolve();
-
-    return this.pc!.createOffer(this.options.offerOptions)
-      .then(offer => {
-        if (this.destroyed || !offer.sdp) return;
-        if (this.options.disableTrickle === true) offer.sdp = removeTrickle(offer.sdp);
-        offer.sdp = this.options.sdpTransform ? this.options.sdpTransform(offer.sdp) : offer.sdp;
-
-        const sendOffer = () => {
-          if (this.destroyed) return;
-          const signal = this.pc!.localDescription || offer;
-          this.emitSignal({
-            type: signal.type,
-            sdp: signal.sdp ?? ''
-          });
-        };
-
-        const onSuccess = () => {
-          this.debug('createOffer success');
-          if (this.destroyed) return;
-          if (!this.options.disableTrickle || this.iceComplete) sendOffer();
-          else this.eventEmitter.once('_iceComplete', sendOffer); // wait for candidates
-        };
-
-        const onError = () => {
-          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
-        };
-
-        return this.pc!.setLocalDescription(offer)
-          .then(onSuccess)
-          .catch(onError);
+    void this.pc!.setLocalDescription()
+      .then(() => {
+        if (this.destroyed) return;
+        this.debug('setLocalDescription (offer) success');
+        this.signalLocalDescription();
       })
       .catch(() => {
-        if (!this.destroyed) this._destroy(new Error('ERR_CREATE_OFFER'));
+        if (!this.destroyed) this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+      })
+      .finally(() => {
+        this.makingOffer = false;
       });
+  }
+
+  private signalLocalDescription () {
+    if (this.destroyed) return;
+
+    const sendDesc = () => {
+      if (this.destroyed) return;
+      const desc = this.pc!.localDescription;
+      if (!desc || !desc.sdp) return;
+      let sdp = desc.sdp;
+      if (this.options.disableTrickle) sdp = removeTrickle(sdp);
+      if (this.options.sdpTransform) sdp = this.options.sdpTransform(sdp);
+      this.emitSignal({ type: desc.type, sdp });
+    };
+
+    if (!this.options.disableTrickle || this.iceComplete) sendDesc();
+    else this.eventEmitter.once('_iceComplete', sendDesc);
   }
 
   private addIceCandidate (candidate: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate']) {
@@ -248,43 +231,6 @@ export class SimplePeer {
         } else {
           this._destroy(new Error('ERR_ADD_ICE_CANDIDATE'));
         }
-      });
-  }
-
-  private createAnswer () {
-    if (this.destroyed) return;
-
-    this.pc!.createAnswer(this.options.answerOptions)
-      .then(answer => {
-        if (this.destroyed || !answer.sdp) return;
-        if (this.options.disableTrickle === true) answer.sdp = removeTrickle(answer.sdp);
-        answer.sdp = this.options.sdpTransform ? this.options.sdpTransform(answer.sdp) : answer.sdp;
-
-        const sendAnswer = () => {
-          if (this.destroyed) return;
-          const signal = this.pc!.localDescription || answer;
-          this.emitSignal({
-            type: signal.type,
-            sdp: signal.sdp ?? ''
-          });
-        };
-
-        const onSuccess = () => {
-          if (this.destroyed) return;
-          if (!this.options.disableTrickle || this.iceComplete) sendAnswer();
-          else this.eventEmitter.once('_iceComplete', sendAnswer);
-        };
-
-        const onError = () => {
-          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
-        };
-
-        this.pc!.setLocalDescription(answer)
-          .then(onSuccess)
-          .catch(onError);
-      })
-      .catch(() => {
-        this._destroy(new Error('ERR_CREATE_ANSWER'));
       });
   }
 
@@ -353,7 +299,14 @@ export class SimplePeer {
     });
     this.pendingCandidates = [];
 
-    if (this.pc!.remoteDescription?.type === 'offer') this.createAnswer();
+    if (this.pc!.remoteDescription?.type === 'offer') {
+      try {
+        await this.pc!.setLocalDescription();
+        if (!this.destroyed) this.signalLocalDescription();
+      } catch {
+        if (!this.destroyed) this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+      }
+    }
   }
   // #endregion
 
