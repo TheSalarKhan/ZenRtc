@@ -761,6 +761,8 @@ export class SimplePeer {
 
       clearInterval(this.closingInterval);
       this.closingInterval = undefined;
+      clearTimeout(this.iceCompleteTimer);
+      this.iceCompleteTimer = undefined;
 
       if (this.channel) {
         try {
