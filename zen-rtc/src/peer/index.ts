@@ -41,13 +41,16 @@ export interface SimplePeerInitOptions {
   streams?: MediaStream[];
   channelConfig?: RTCDataChannelInit;
   config?: RTCConfiguration;
-  offerOptions?: RTCOfferOptions;
-  answerOptions?: RTCAnswerOptions;
   sdpTransform?: (sdp: string) => string;
   iceCompleteTimeout?: number;
 }
 
 export class SimplePeer {
+  /** Perfect negotiation: polite peer rolls back on offer glare; impolite (initiator) ignores rival offers. */
+  private get polite () {
+    return !this.options.initiator;
+  }
+
   private eventEmitter: EventEmitter;
   private pc: RTCPeerConnection | null;
   private id: string;
@@ -62,20 +65,16 @@ export class SimplePeer {
   private connected = false;
   private connecting = false;
   private isReactNativeWebrtc = false;
-  private localAddress?: string;
-  private localPort?: number;
-  private localFamily?: 'IPv6' | 'IPv4';
-  private remoteAddress?: string;
-  private remotePort?: number;
-  private remoteFamily?: 'IPv6' | 'IPv4';
   private channel?: RTCDataChannel | null = null;
   private closingInterval?: ReturnType<typeof setInterval>;
   private senderMap: Map<MediaStreamTrack, Map<MediaStream, RTCRtpSender>> = new Map();
   private remoteTracks: { track: MediaStreamTrack; stream: MediaStream }[] = [];
   private batchedNegotiation: boolean = false;
-  private firstNegotiation: boolean = true;
   private isNegotiating: boolean = false;
   private queuedNegotiation: boolean = false;
+  private makingOffer = false;
+  private ignoreOffer = false;
+  private isSettingRemoteAnswerPending = false;
   private iceComplete: boolean = false;
   private iceCompleteTimer?: ReturnType<typeof setTimeout>;
   private sendersAwaitingStable: RTCRtpSender[] = [];
@@ -115,6 +114,10 @@ export class SimplePeer {
       this.onIceCandidate(event);
     };
 
+    this.pc.onnegotiationneeded = () => {
+      this.enqueueNegotiationNeeded();
+    };
+
     // HACK: Fix for odd Firefox behavior, see: https://github.com/feross/simple-peer/pull/783
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
     if (typeof (this.pc as any).peerIdentity === 'object') {
@@ -123,12 +126,6 @@ export class SimplePeer {
         this._destroy(new Error('ERR_PC_PEER_IDENTITY'));
       });
     }
-
-    // Other spec events, unused by this implementation:
-    // - onconnectionstatechange
-    // - onicecandidateerror
-    // - onfingerprintfailure
-    // - onnegotiationneeded
 
     if (this.options.initiator) {
       const dataChannelName = `dc_${v4()}`;
@@ -149,15 +146,9 @@ export class SimplePeer {
     this.pc.ontrack = event => {
       this.onTrack(event);
     };
-
-    this.debug('initial negotiation');
-    this.needsNegotiation();
-
-
-
   }
 
-  // #region needsNegotiation
+  // #region perfectNegotiation
   private emitSignal(payload: SignalEventPayloadType) {
     if(this.channelReady && this.connected && this.channel) {
       const message = {
@@ -168,90 +159,67 @@ export class SimplePeer {
       this.debug(`signal<via-data-channel> -> ${payload.type}`);
       // assuming the encoded string will always be under 16KiB
       // which is a sane size for a single `sendData`.
-      this.sendData(this.textEncoder.encode(jsonString));
+      this.sendData(this.textEncoder.encode(jsonString).buffer);
       return;
     }
     this.debug(`signal -> ${payload.type}`);
     this.emit('signal', payload);
   }
 
-  private needsNegotiation () {
-    this.debug('_needsNegotiation');
-    if (this.batchedNegotiation) return; // batch synchronous renegotiations
+  private enqueueNegotiationNeeded () {
+    this.debug('_enqueueNegotiationNeeded');
+    if (this.batchedNegotiation) return;
     this.batchedNegotiation = true;
     queueMicrotask(() => {
       this.batchedNegotiation = false;
-      if (this.options.initiator || !this.firstNegotiation) {
-        this.debug('starting batched negotiation');
-        this.negotiate();
-      } else {
-        this.debug('non-initiator initial negotiation request discarded');
-      }
-      this.firstNegotiation = false;
+      this.runNegotiationNeededJob();
     });
   }
 
-  private createOffer () {
-    if (this.destroyed) return;
-
-    this.pc!.createOffer(this.options.offerOptions)
-      .then(offer => {
-        if (this.destroyed || !offer.sdp) return;
-        if (this.options.disableTrickle === true) offer.sdp = removeTrickle(offer.sdp);
-        offer.sdp = this.options.sdpTransform ? this.options.sdpTransform(offer.sdp) : offer.sdp;
-
-        const sendOffer = () => {
-          if (this.destroyed) return;
-          const signal = this.pc!.localDescription || offer;
-          this.emitSignal({
-            type: signal.type,
-            sdp: signal.sdp ?? ''
-          });
-        };
-
-        const onSuccess = () => {
-          this.debug('createOffer success');
-          if (this.destroyed) return;
-          if (!this.options.disableTrickle || this.iceComplete) sendOffer();
-          else this.eventEmitter.once('_iceComplete', sendOffer); // wait for candidates
-        };
-
-        const onError = () => {
-          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
-        };
-
-        this.pc!.setLocalDescription(offer)
-          .then(onSuccess)
-          .catch(onError);
+  private runNegotiationNeededJob () {
+    if (this.destroyed || this.destroying) return;
+    if (this.isNegotiating) {
+      this.queuedNegotiation = true;
+      this.debug('already negotiating, queueing');
+      return;
+    }
+    if (this.pc!.signalingState !== 'stable') {
+      this.queuedNegotiation = true;
+      this.debug('defer negotiation until stable (signalingState=%s)', this.pc!.signalingState);
+      return;
+    }
+    this.isNegotiating = true;
+    this.makingOffer = true;
+    this.debug('start negotiation (onnegotiationneeded)');
+    void this.pc!.setLocalDescription()
+      .then(() => {
+        if (this.destroyed) return;
+        this.debug('setLocalDescription (offer) success');
+        this.signalLocalDescription();
       })
       .catch(() => {
-        this._destroy(new Error('ERR_CREATE_OFFER'));
+        if (!this.destroyed) this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+      })
+      .finally(() => {
+        this.makingOffer = false;
       });
   }
 
-  private negotiate () {
-    if (this.destroying) return;
-    if (this.destroyed) throw new Error('ERR_DESTROYED');
+  private signalLocalDescription () {
+    if (this.destroyed) return;
 
-    if(this.isNegotiating) {
-      this.queuedNegotiation = true;
-      this.debug('already negotiating, queueing');
-    } else {
-      if (this.options.initiator) {
-        this.debug('start negotiation');
-        setTimeout(() => { // HACK: Chrome crashes if we immediately call createOffer
-          this.createOffer();
-        }, 0);
-      } else {
-        this.debug('requesting negotiation from initiator');
-        this.emitSignal({ // request initiator to renegotiate
-          type: 'renegotiate',
-          renegotiate: true
-        });
-      }
-      this.isNegotiating = true;
-    }
+    const sendDesc = () => {
+      if (this.destroyed) return;
+      const desc = this.pc!.localDescription;
+      if (!desc || !desc.sdp) return;
+      let sdp = desc.sdp;
+      if (this.options.disableTrickle) sdp = removeTrickle(sdp);
+      if (this.options.sdpTransform) sdp = this.options.sdpTransform(sdp);
+      this.emitSignal({ type: desc.type, sdp });
+    };
 
+    if (!this.options.disableTrickle || this.iceComplete) sendDesc();
+    else this.eventEmitter.once('_iceComplete', sendDesc);
   }
 
   private addIceCandidate (candidate: Extract<SignalEventPayloadType, { type: 'candidate' }>['candidate']) {
@@ -266,105 +234,78 @@ export class SimplePeer {
       });
   }
 
-  private requestMissingTransceivers () {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    const anyCast = this.pc as any;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    if (anyCast.getTransceivers) {
-      this.pc!.getTransceivers().forEach(transceiver => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-        if (!transceiver.mid && transceiver.sender.track && !(transceiver as any).requested) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-          (transceiver as any).requested = true; // HACK: Safari returns negotiated transceivers with a null mid
-          this.debug('requestMissingTransceivers() [non-initiator] found a missing transceiver\n\nThis happens only when the non-initiator adds/removes stream or track from the connection.');
-          this.addTransceiver(transceiver.sender.track.kind);
-        }
-      });
-    }
-  }
-
-  private createAnswer () {
-    if (this.destroyed) return;
-
-    this.pc!.createAnswer(this.options.answerOptions)
-      .then(answer => {
-        if (this.destroyed || !answer.sdp) return;
-        if (this.options.disableTrickle === true) answer.sdp = removeTrickle(answer.sdp);
-        answer.sdp = this.options.sdpTransform ? this.options.sdpTransform(answer.sdp) : answer.sdp;
-
-        const sendAnswer = () => {
-          if (this.destroyed) return;
-          const signal = this.pc!.localDescription || answer;
-          this.emitSignal({
-            type: signal.type,
-            sdp: signal.sdp ?? ''
-          });
-          if (!this.options.initiator) this.requestMissingTransceivers();
-        };
-
-        const onSuccess = () => {
-          if (this.destroyed) return;
-          if (!this.options.disableTrickle || this.iceComplete) sendAnswer();
-          else this.eventEmitter.once('_iceComplete', sendAnswer);
-        };
-
-        const onError = () => {
-          this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
-        };
-
-        this.pc!.setLocalDescription(answer)
-          .then(onSuccess)
-          .catch(onError);
-      })
-      .catch(() => {
-        this._destroy(new Error('ERR_CREATE_ANSWER'));
-      });
-  }
-
   public signal (data: SignalEventPayloadType) {
     if (this.destroying) return;
     if (this.destroyed) throw new Error('ERR_DESTROYED');
     this.debug(`signal(${data.type})`);
+    void this.handleSignalPayload(data);
+  }
 
-    switch(data.type) {
-    case 'renegotiate':
-      if(!this.options.initiator) break;
-      this.debug('got request to renegotiate');
-      this.needsNegotiation();
-      break;
-    case 'transceiverRequest':
-      if(!this.options.initiator) break;
-      this.debug('got request for transceiver');
-      this.addTransceiver(data.transceiverRequest.kind, data.transceiverRequest.init);
-      break;
-    case 'candidate':
+  private async handleSignalPayload (data: SignalEventPayloadType): Promise<void> {
+    if (data.type === 'candidate') {
+      if (this.ignoreOffer && !this.pc!.remoteDescription) {
+        this.debug('skip ICE candidate (ignoreOffer, no remoteDescription)');
+        return;
+      }
       if (this.pc!.remoteDescription && this.pc!.remoteDescription.type) {
         this.addIceCandidate(data.candidate);
       } else {
         this.pendingCandidates.push(data.candidate);
       }
-      break;
-    case 'answer':
-    case 'offer':
-    case 'pranswer':
-    case 'rollback':
-      this.pc!.setRemoteDescription(new (this.options.wrtc.RTCSessionDescription)(data))
-        .then(() => {
-          if (this.destroyed) return;
+      return;
+    }
 
-          this.pendingCandidates.forEach(candidate => {
-            this.addIceCandidate(candidate);
-          });
-          this.pendingCandidates = [];
+    const description = data;
+    const readyForOffer =
+      !this.makingOffer &&
+      (this.pc!.signalingState === 'stable' || this.isSettingRemoteAnswerPending);
+    const offerCollision = description.type === 'offer' && !readyForOffer;
 
-          if (this.pc!.remoteDescription?.type === 'offer') this.createAnswer();
-        })
-        .catch(() => {
-          this._destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
-        });
-      break;
-    default:
-      this._destroy(new Error('signal() called with invalid signal data'));
+    this.ignoreOffer = !this.polite && offerCollision;
+    if (this.ignoreOffer) {
+      this.debug('impolite: ignoring colliding offer');
+      return;
+    }
+
+    if (description.type === 'answer') {
+      this.isSettingRemoteAnswerPending = true;
+    }
+
+    const SessionDesc = this.options.wrtc.RTCSessionDescription;
+
+    try {
+      if (offerCollision && this.polite) {
+        this.debug('polite: rollback + apply remote offer');
+        await Promise.all([
+          this.pc!.setLocalDescription({ type: 'rollback' }),
+          this.pc!.setRemoteDescription(new SessionDesc(description))
+        ]);
+      } else {
+        await this.pc!.setRemoteDescription(new SessionDesc(description));
+      }
+    } catch {
+      this._destroy(new Error('ERR_SET_REMOTE_DESCRIPTION'));
+      return;
+    } finally {
+      if (description.type === 'answer') {
+        this.isSettingRemoteAnswerPending = false;
+      }
+    }
+
+    if (this.destroyed) return;
+
+    this.pendingCandidates.forEach(candidate => {
+      this.addIceCandidate(candidate);
+    });
+    this.pendingCandidates = [];
+
+    if (this.pc!.remoteDescription?.type === 'offer') {
+      try {
+        await this.pc!.setLocalDescription();
+        if (!this.destroyed) this.signalLocalDescription();
+      } catch {
+        if (!this.destroyed) this._destroy(new Error('ERR_SET_LOCAL_DESCRIPTION'));
+      }
     }
   }
   // #endregion
@@ -400,18 +341,10 @@ export class SimplePeer {
     if (this.destroyed) throw new Error('ERR_DESTROYED');
     this.debug('addTransceiver()');
 
-    if (this.options.initiator) {
-      try {
-        this.pc!.addTransceiver(kind, init);
-        this.needsNegotiation();
-      } catch (err) {
-        this._destroy(new Error('ERR_ADD_TRANSCEIVER'));
-      }
-    } else {
-      this.emitSignal({ // request initiator to renegotiate
-        type: 'transceiverRequest',
-        transceiverRequest: { kind, init }
-      });
+    try {
+      this.pc!.addTransceiver(kind, init);
+    } catch {
+      this._destroy(new Error('ERR_ADD_TRANSCEIVER'));
     }
   }
 
@@ -428,7 +361,6 @@ export class SimplePeer {
       type ReactNativeRTCPeerConnection = RTCPeerConnection & { addStream: (stream: MediaStream) => void };
       const pcForReactNative = this.pc! as ReactNativeRTCPeerConnection;
       pcForReactNative.addStream(stream);
-      this.needsNegotiation();
     }
   }
 
@@ -443,7 +375,6 @@ export class SimplePeer {
       sender = this.pc!.addTrack(track, stream);
       submap.set(stream, sender);
       this.senderMap.set(track, submap);
-      this.needsNegotiation();
     } else {
       throw new Error('ERR_SENDER_ALREADY_ADDED');
     }
@@ -470,7 +401,6 @@ export class SimplePeer {
         this._destroy(new Error('ERR_REMOVE_TRACK'));
       }
     }
-    this.needsNegotiation();
   }
 
   public removeStream (stream: MediaStream) {
@@ -507,7 +437,7 @@ export class SimplePeer {
       109, 101, 115, 115,  97, 103, 101, 34
     ]);
     if(eventData.length > prefix.length) {
-      const prefixDoesNotMatch = prefix.some((value, idx) => eventData.at(idx) !== value);
+      const prefixDoesNotMatch = prefix.some((value, idx) => eventData[idx] !== value);
       const prefixMatches = !prefixDoesNotMatch;
       return prefixMatches;
     }
@@ -602,6 +532,7 @@ export class SimplePeer {
 
   /* eslint-disable */
   // TODO: Need to refactor this function it has been copied and pasted as is.
+  // there's allot of any used, we can perhaps use some types.
   private getStats(cb: (error?: any, items?: GetStatsItem[]) => void) {
     // statreports can come with a value array instead of properties
     const flattenValues = (report:any) => {
@@ -676,6 +607,8 @@ export class SimplePeer {
         const candidatePairs: { [k: string]: GetStatsItem } = {};
         let foundSelectedCandidatePair = false;
 
+        // extract all candidate types (local, remote, candidate pairs) and populate them
+        // in the arrays above.
         items?.forEach(item => {
           // TODO: Once all browsers support the hyphenated stats report types, remove
           // the non-hypenated ones
@@ -690,62 +623,64 @@ export class SimplePeer {
           }
         });
 
-        const setSelectedCandidatePair = (selectedCandidatePair: GetStatsItem) => {
+        const logSelectedCandidatePairInfo = (selectedCandidatePair: GetStatsItem | undefined) => {
+          if (!selectedCandidatePair) return;
           foundSelectedCandidatePair = true;
+
+          let localAddress: string | undefined;
+          let localPort: number | undefined;
+          let remoteAddress: string | undefined;
+          let remotePort: number | undefined;
 
           const local = localCandidates[selectedCandidatePair.localCandidateId as string];
 
           if (local && (local.ip || local.address)) {
             // Spec
-            this.localAddress = local.ip || local.address;
-            this.localPort = Number(local.port);
+            localAddress = local.ip || local.address;
+            localPort = Number(local.port);
           } else if (local && local.ipAddress) {
             // Firefox
-            this.localAddress = local.ipAddress;
-            this.localPort = Number(local.portNumber);
+            localAddress = local.ipAddress;
+            localPort = Number(local.portNumber);
           } else if (typeof selectedCandidatePair.googLocalAddress === 'string') {
             // TODO: remove this once Chrome 58 is released
-            const local = selectedCandidatePair.googLocalAddress.split(':');
-            this.localAddress = local[0];
-            this.localPort = Number(local[1]);
-          }
-          if (this.localAddress) {
-            this.localFamily = this.localAddress.includes(':') ? 'IPv6' : 'IPv4';
+            const parts = selectedCandidatePair.googLocalAddress.split(':');
+            localAddress = parts[0];
+            localPort = Number(parts[1]);
           }
 
           const remote = remoteCandidates[selectedCandidatePair.remoteCandidateId as string];
 
           if (remote && (remote.ip || remote.address)) {
             // Spec
-            this.remoteAddress = remote.ip || remote.address;
-            this.remotePort = Number(remote.port);
+            remoteAddress = remote.ip || remote.address;
+            remotePort = Number(remote.port);
           } else if (remote && remote.ipAddress) {
             // Firefox
-            this.remoteAddress = remote.ipAddress;
-            this.remotePort = Number(remote.portNumber);
+            remoteAddress = remote.ipAddress;
+            remotePort = Number(remote.portNumber);
           } else if (typeof selectedCandidatePair.googRemoteAddress === 'string') {
             // TODO: remove this once Chrome 58 is released
-            const remote = selectedCandidatePair.googRemoteAddress.split(':');
-            this.remoteAddress = remote[0];
-            this.remotePort = Number(remote[1]);
-          }
-          if (this.remoteAddress) {
-            this.remoteFamily = this.remoteAddress.includes(':') ? 'IPv6' : 'IPv4';
+            const parts = selectedCandidatePair.googRemoteAddress.split(':');
+            remoteAddress = parts[0];
+            remotePort = Number(parts[1]);
           }
 
           this.debug(
             'connect local: %s:%s remote: %s:%s',
-            this.localAddress,
-            this.localPort,
-            this.remoteAddress,
-            this.remotePort
+            localAddress,
+            localPort,
+            remoteAddress,
+            remotePort
           );
         };
 
+        // now go through all transport stats report items
+        // and find the ones that have selected candidate pairs.
         items?.forEach(item => {
           // Spec-compliant
           if (item.type === 'transport' && item.selectedCandidatePairId) {
-            setSelectedCandidatePair(candidatePairs[item.selectedCandidatePairId]);
+            logSelectedCandidatePairInfo(candidatePairs[item.selectedCandidatePairId]);
           }
 
           // Old implementations
@@ -753,7 +688,7 @@ export class SimplePeer {
             (item.type === 'googCandidatePair' && item.googActiveConnection === 'true') ||
             ((item.type === 'candidatepair' || item.type === 'candidate-pair') && item.selected)
           ) {
-            setSelectedCandidatePair(item);
+            logSelectedCandidatePairInfo(item);
           }
         });
 
@@ -826,6 +761,8 @@ export class SimplePeer {
 
       clearInterval(this.closingInterval);
       this.closingInterval = undefined;
+      clearTimeout(this.iceCompleteTimer);
+      this.iceCompleteTimer = undefined;
 
       if (this.channel) {
         try {
@@ -852,6 +789,7 @@ export class SimplePeer {
         this.pc.onicegatheringstatechange = null;
         this.pc.onsignalingstatechange = null;
         this.pc.onicecandidate = null;
+        this.pc.onnegotiationneeded = null;
         this.pc.ontrack = null;
         this.pc.ondatachannel = null;
       }
@@ -881,7 +819,6 @@ export class SimplePeer {
         this.debug('flushing sender queue', this.sendersAwaitingStable);
         this.sendersAwaitingStable.forEach(sender => {
           this.pc!.removeTrack(sender);
-          this.queuedNegotiation = true;
         });
         this.sendersAwaitingStable = [];
       }
@@ -889,7 +826,7 @@ export class SimplePeer {
       if (this.queuedNegotiation) {
         this.debug('flushing negotiation queue');
         this.queuedNegotiation = false;
-        this.needsNegotiation(); // negotiate again
+        this.enqueueNegotiationNeeded();
       } else {
         this.debug('signaling state now stable');
         this.emit('negotiated', undefined);

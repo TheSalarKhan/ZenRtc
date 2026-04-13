@@ -1,7 +1,4 @@
 export type SignalEventPayloadType = {
-    type: 'renegotiate',
-    renegotiate: boolean
-  } | {
     type: RTCSdpType,
     sdp: string
   } | {
@@ -10,12 +7,6 @@ export type SignalEventPayloadType = {
       candidate: string,
       sdpMLineIndex: number | null,
       sdpMid: string | null
-    }
-  } | {
-    type: 'transceiverRequest',
-    transceiverRequest: {
-      kind: string,
-      init?: RTCRtpTransceiverInit
     }
   };
 
