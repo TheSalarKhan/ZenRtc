@@ -437,7 +437,7 @@ export class SimplePeer {
       109, 101, 115, 115,  97, 103, 101, 34
     ]);
     if(eventData.length > prefix.length) {
-      const prefixDoesNotMatch = prefix.some((value, idx) => eventData.at(idx) !== value);
+      const prefixDoesNotMatch = prefix.some((value, idx) => eventData[idx] !== value);
       const prefixMatches = !prefixDoesNotMatch;
       return prefixMatches;
     }
